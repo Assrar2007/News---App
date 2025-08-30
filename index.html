@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Apple News - Popular Articles</title>
+  <style>
+    :root { --brand:#007bff; --bg:#f9f9f9; --ink:#111; --muted:#555; --thin:#777; }
+    *{box-sizing:border-box}
+    body{font-family:Arial,Helvetica,sans-serif;background:var(--bg);margin:0}
+    header{
+      background:var(--ink);color:#fff;padding:15px 20px;display:flex;
+      justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap
+    }
+    header h1{margin:0;font-size:20px;line-height:1.2}
+    .search-bar{display:flex;gap:8px;flex-wrap:wrap}
+    .search-bar input{
+      padding:10px 12px;border-radius:8px;border:none;min-width:220px;outline:none
+    }
+    .search-bar button{
+      background:var(--brand);color:#fff;border:none;padding:10px 14px;
+      border-radius:8px;cursor:pointer;transition:background .2s
+    }
+    .search-bar button:hover{background:#0056b3}
+    .meta{
+      width:100%;padding:8px 20px;color:#fff;opacity:.85;font-size:12px
+    }
+    #news-container{
+      display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+      gap:20px;padding:20px
+    }
+    .news-card{
+      background:#fff;border-radius:12px;box-shadow:0 4px 8px rgba(0,0,0,.08);
+      overflow:hidden;display:flex;flex-direction:column;transition:transform .2s
+    }
+    .news-card:hover{transform:translateY(-5px)}
+    .news-card img{width:100%;height:180px;object-fit:cover;background:#e9e9e9}
+    .news-content{padding:14px;display:flex;flex-direction:column;gap:10px;flex:1}
+    .news-content h3{font-size:18px;margin:0}
+    .news-content p{font-size:14px;color:var(--muted);margin:0;flex:1}
+    .news-footer{font-size:12px;color:var(--thin);display:flex;gap:8px;flex-wrap:wrap}
+    .read-more{
+      text-decoration:none;background:var(--brand);color:#fff;padding:8px 12px;
+      border-radius:6px;font-size:14px;align-self:flex-start;transition:background .2s
+    }
+    .read-more:hover{background:#0056b3}
+    .empty{padding:40px;text-align:center;color:#444}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🍎 Apple News — Popular Articles</h1>
+    <div class="search-bar">
+      <input id="searchInput" type="text" placeholder="Search news (e.g., iphone, vision pro, m4)…" />
+      <button id="searchBtn">Search</button>
+    </div>
+    <div class="meta" id="metaLine">Loading…</div>
+  </header>
+
+  <main id="news-container"></main>
+
+  <script>
+    // ---------- CONFIG ----------
+    // Curated, high-quality feeds (no keys needed).
+    // Sources: Apple Newsroom, MacRumors, 9to5Mac, The Verge, TechCrunch (Apple tag)
+    const FEEDS = [
+      { name: "Apple Newsroom", url: "https://www.apple.com/newsroom/rss-feed.rss" },
+      { name: "MacRumors", url: "https://feeds.macrumors.com/MacRumors-All" },
+      { name: "9to5Mac", url: "https://9to5mac.com/feed/" },
+      { name: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
+      { name: "TechCrunch", url: "https://techcrunch.com/tag/apple/feed/" }
+    ];
+
+    // "Popular publishers first" — tweak order here (lower index = higher priority)
+    const POPULARITY_ORDER = [
+      "Apple Newsroom",
+      "The Verge",
+      "TechCrunch",
+      "CNBC",            // (kept for future additions)
+      "MacRumors",
+      "9to5Mac"
+    ];
+
+    const newsContainer = document.getElementById("news-container");
+    const metaLine = document.getElementById("metaLine");
+    const searchInput = document.getElementById("searchInput");
+    const searchBtn = document.getElementById("searchBtn");
+
+    // ---------- HELPERS ----------
+    const byPopularityThenDate = (a, b) => {
+      const aw = POPULARITY_ORDER.indexOf(a.source);
+      const bw = POPULARITY_ORDER.indexOf(b.source);
+      const aW = aw === -1 ? 999 : aw;
+      const bW = bw === -1 ? 999 : bw;
+      if (aW !== bW) return aW - bW;
+      return (b.publishedAt || 0) - (a.publishedAt || 0);
+    };
+
+    const sanitize = (str) => (str || "").replace(/<[^>]+>/g, "").trim();
+
+    const pickImage = (item) => {
+      // rss2json fields
+      if (item.enclosure && item.enclosure.link) return item.enclosure.link;
+      if (item.thumbnail) return item.thumbnail;
+
+      // XML parsed fields
+      if (item.enclosureUrl) return item.enclosureUrl;
+      if (item.mediaContentUrl) return item.mediaContentUrl;
+      if (item.mediaThumbnailUrl) return item.mediaThumbnailUrl;
+
+      // Try first <img> from description/content
+      const html = item.content || item.description || "";
+      const m = html.match(/<img[^>]+src="([^"]+)"/i);
+      if (m) return m[1];
+
+      return "https://via.placeholder.com/800x450?text=No+Image";
+    };
+
+    // ---------- FETCHERS ----------
+    // 1) Try rss2json (simple JSON, CORS ok)
+    async function fetchViaRss2Json(feedUrl) {
+      const url = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feedUrl)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("rss2json failed");
+      const data = await res.json();
+      if (!data || !data.items) throw new Error("rss2json bad shape");
+      const sourceName = data.feed && data.feed.title ? data.feed.title : "";
+      return data.items.map(it => ({
+        title: sanitize(it.title),
+        url: it.link,
+        description: sanitize(it.description || it.content),
+        publishedAt: it.pubDate ? new Date(it.pubDate).getTime() : null,
+        source: sourceName || guessSourceFromUrl(feedUrl),
+        image: pickImage(it)
+      }));
+    }
+
+    // 2) Fallback: fetch raw XML via AllOrigins and parse in-browser
+    async function fetchViaAllOrigins(feedUrl) {
+      const url = `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("allorigins failed");
+      const xmlText = await res.text();
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(xmlText, "application/xml");
+
+      // RSS 2.0 items
+      let items = Array.from(xml.querySelectorAll("item")).map(n => {
+        const get = (sel) => n.querySelector(sel)?.textContent || "";
+        return {
+          title: sanitize(get("title")),
+          url: get("link"),
+          description: get("description") || get("content\\:encoded"),
+          publishedAt: get("pubDate") ? new Date(get("pubDate")).getTime() : null,
+          source: sanitize(xml.querySelector("channel > title")?.textContent) || guessSourceFromUrl(feedUrl),
+          enclosureUrl: n.querySelector("enclosure")?.getAttribute("url") || "",
+          mediaContentUrl: n.querySelector("media\\:content")?.getAttribute("url") || "",
+          mediaThumbnailUrl: n.querySelector("media\\:thumbnail")?.getAttribute("url") || ""
+        };
+      });
+
+      // Atom entries (if any)
+      if (items.length === 0) {
+        items = Array.from(xml.querySelectorAll("entry")).map(n => {
+          const get = (sel) => n.querySelector(sel)?.textContent || "";
+          const linkEl = n.querySelector("link[rel='alternate']") || n.querySelector("link");
+          return {
+            title: sanitize(get("title")),
+            url: linkEl?.getAttribute("href") || "",
+            description: get("summary") || get("content"),
+            publishedAt: get("updated") ? new Date(get("updated")).getTime() :
+                         get("published") ? new Date(get("published")).getTime() : null,
+            source: sanitize(xml.querySelector("feed > title")?.textContent) || guessSourceFromUrl(feedUrl),
+          };
+        });
+      }
+
+      // Normalize and add image
+      return items.map(it => ({
+        title: sanitize(it.title),
+        url: it.url,
+        description: sanitize(it.description),
+        publishedAt: it.publishedAt || null,
+        source: it.source,
+        image: pickImage(it)
+      }));
+    }
+
+    function guessSourceFromUrl(u) {
+      try { return new URL(u).hostname.replace("www.",""); } catch { return "Source"; }
+    }
+
+    async function fetchFeed(feed) {
+      try {
+        return await fetchViaRss2Json(feed.url);
+      } catch {
+        // fallback to XML parsing
+        try {
+          return await fetchViaAllOrigins(feed.url);
+        } catch {
+          console.warn(`Failed to fetch ${feed.name}`);
+          return [];
+        }
+      }
+    }
+
+    // ---------- RENDER ----------
+    function renderArticles(list, query) {
+      newsContainer.innerHTML = "";
+      if (!list.length) {
+        newsContainer.innerHTML = `<div class="empty">No articles found${query ? ` for “${query}”` : ""}.</div>`;
+        return;
+      }
+      for (const a of list) {
+        const card = document.createElement("div");
+        card.className = "news-card";
+        card.innerHTML = `
+          <img src="${a.image}" alt="News Image" loading="lazy" />
+          <div class="news-content">
+            <h3>${a.title}</h3>
+            <p>${a.description || "No description available."}</p>
+            <a href="${a.url}" target="_blank" rel="noopener noreferrer" class="read-more">Read More</a>
+            <div class="news-footer">
+              <span>Source: ${a.source}</span>
+              <span>•</span>
+              <span>${a.publishedAt ? new Date(a.publishedAt).toLocaleString() : ""}</span>
+            </div>
+          </div>
+        `;
+        newsContainer.appendChild(card);
+      }
+    }
+
+    // ---------- CONTROLLER ----------
+    async function loadNews(query = "apple") {
+      metaLine.textContent = "Loading…";
+      newsContainer.innerHTML = `<div class="empty">Loading news…</div>`;
+
+      // Pull all feeds in parallel
+      const results = await Promise.all(FEEDS.map(fetchFeed));
+      let articles = results.flat();
+
+      // Filter by query (title + description)
+      const q = (query || "").trim().toLowerCase();
+      if (q) {
+        articles = articles.filter(a =>
+          (a.title || "").toLowerCase().includes(q) ||
+          (a.description || "").toLowerCase().includes(q)
+        );
+      }
+
+      // Dedupe by URL
+      const seen = new Set();
+      articles = articles.filter(a => {
+        if (!a.url || seen.has(a.url)) return false;
+        seen.add(a.url); return true;
+      });
+
+      // Sort: popular publishers first, then newest
+      articles.sort(byPopularityThenDate);
+
+      metaLine.textContent = `Showing ${articles.length} articles • Query: “${q || "apple"}” • Sources: ${FEEDS.length}`;
+      renderArticles(articles, q);
+    }
+
+    // Search handlers
+    searchBtn.addEventListener("click", () => loadNews(searchInput.value));
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loadNews(searchInput.value);
+    });
+
+    // Initial load
+    loadNews();
+  </script>
+</body>
+</html>
